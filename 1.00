@@ -1,0 +1,457 @@
+import requests
+import json
+from datetime import datetime
+
+def get_api_token():
+    """
+    APIにログインしてトークンを取得する。
+    """
+    url = 'https://api.m2msystems.cloud/login'
+    mail = "development+20211103@matsuri-tech.com"
+    password = "rYGOOh9PgUxFhjhd"
+    
+
+    payload = {"email": mail, "password": password}
+
+    print("[INFO] === get_api_token: Start ===")
+    try:
+        response = requests.post(url, json=payload)
+        print("[DEBUG] Login response status code:", response.status_code)
+        if response.status_code == 200:
+            json_data = response.json()
+            token = json_data.get('accessToken')
+            if token:
+                print("[INFO] Successfully retrieved token.")
+                print("[DEBUG] Token (first 20 chars):", token[:20], "...")
+                print("[INFO] === get_api_token: End ===\n")
+                return token
+            else:
+                print("[ERROR] Token not found in response.")
+                print("[INFO] === get_api_token: End ===\n")
+                return None
+        else:
+            print("[ERROR] Failed to get token:", response.text)
+            print("[INFO] === get_api_token: End ===\n")
+            return None
+    except requests.exceptions.RequestException as e:
+        print("[ERROR] Exception in get_api_token:", e)
+        print("[INFO] === get_api_token: End ===\n")
+        return None
+
+
+def get_today_cleanings(token: str, target_photo_tour_id: str) -> list:
+    """
+    Bearer token を用いて、当日の清掃情報を取得。
+    さらに photoTourId == target_photo_tour_id のものだけを抽出。
+    
+    - 日付は固定で "2025-01-28" に設定
+    - 戻り値: [{"id":..., "photoTourId":..., ...}, ...]
+    """
+    print("[INFO] === get_today_cleanings: Start ===")
+    url = "https://api-cleaning.m2msystems.cloud/v4/operations/search"
+    print("[DEBUG] Cleaning search URL:", url)
+
+    # 今日の日付(固定。必要に応じて動的にdatetime.now().strftime("%Y-%m-%d")に変更)
+    today_str = datetime.today().strftime('%Y-%m-%d')
+    print("[DEBUG] Target date:", today_str)
+
+    payload = {
+        "startDate": today_str,
+        "endDate": today_str
+    }
+    print("[DEBUG] Request payload:", payload)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        print("[INFO] Sending POST request for cleaning list...")
+        response = requests.post(url, headers=headers, json=payload)
+        print("[DEBUG] Response status code:", response.status_code)
+        # ログが長くなる場合は部分的に表示
+        print("[DEBUG] Response text (partial):", response.text[:300], "...")
+
+        if response.status_code == 200:
+            data = response.json()
+            if not isinstance(data, list):
+                print("[WARN] The response is not a list as expected. data =", data)
+                print("[INFO] === get_today_cleanings: End ===\n")
+                return []
+
+            print(f"[DEBUG] Total cleanings count: {len(data)}")
+
+            # (A) フィルタ: photoTourId == target_photo_tour_id
+            filtered = []
+            for c in data:
+                if c.get("photoTourId") == target_photo_tour_id:
+                    # 必要なキーだけ取り出してもよいし、このまま全要素を保持してもOK
+                    filtered.append({
+                        "id": c.get("id"),
+                        "photoTourId": c.get("photoTourId"),
+                        "placementId": c.get("placementId"),
+                        "commonAreaName": c.get("commonAreaName"),
+                        "status": c.get("status"),
+                        "cleaningDate": c.get("cleaningDate"),
+                        # 他にも必要なら追加
+                    })
+
+            print(f"[DEBUG] Filtered by photoTourId='{target_photo_tour_id}'. Count: {len(filtered)}")
+
+            print("[INFO] === get_today_cleanings: End ===\n")
+            return filtered
+        else:
+            print("[ERROR] Server returned error while getting cleanings:", response.text)
+            print("[INFO] === get_today_cleanings: End ===\n")
+            return []
+    except requests.exceptions.RequestException as e:
+        print("[ERROR] Exception in get_today_cleanings:", e)
+        print("[INFO] === get_today_cleanings: End ===\n")
+        return []
+
+
+def get_photo_tour_images_by_cleaning_id(token: str, cleaning_id: str) -> list:
+    """
+    指定した cleaning_id の Photo Tour 画像情報(複数) を取得。
+    レスポンスは {"images": [...] } の構造を想定し、
+    各要素の "url" をリスト化して返す。
+    """
+    print(f"[INFO] === get_photo_tour_images_by_cleaning_id({cleaning_id}): Start ===")
+
+    url = f"https://api-cleaning.m2msystems.cloud/v3/photo_tour_images/by_cleaning_id/{cleaning_id}"
+    print("[DEBUG] GET URL:", url)
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    }
+
+    try:
+        response = requests.get(url, headers=headers)
+        print("[DEBUG] Status Code:", response.status_code)
+        print("[DEBUG] Response text (partial):", response.text[:300], "...")
+        if response.status_code == 200:
+            data = response.json()
+            # data = { "images": [ { "id":..., "url":... }, ... ] }
+            images_array = data.get("images", [])
+            if not isinstance(images_array, list):
+                print("[ERROR] 'images' field is not a list. data =", data)
+                return []
+
+            urls = []
+            for img_obj in images_array:
+                url_value = img_obj.get("url")
+                if url_value:
+                    urls.append(url_value)
+
+            print(f"[INFO] Found {len(urls)} image(s).")
+            print("[INFO] === get_photo_tour_images_by_cleaning_id: End ===\n")
+            return urls
+        else:
+            print("[ERROR] Server returned an error:", response.text)
+            print("[INFO] === get_photo_tour_images_by_cleaning_id: End ===\n")
+            return []
+    except requests.RequestException as e:
+        print("[ERROR] Request exception:", e)
+        print("[INFO] === get_photo_tour_images_by_cleaning_id: End ===\n")
+        return []
+
+
+def add_images_to_cleaning(token: str, cleaning_data: dict) -> dict:
+    """
+    1件の清掃データ(dict)を受け取り、対応する複数画像URLを取得し、
+    "urls" フィールドとして格納して返す。
+    """
+    cid = cleaning_data.get("id")
+    if not cid:
+        print("[WARN] cleaning_data に 'id' が無いため画像取得不可.")
+        cleaning_data["urls"] = []
+        return cleaning_data
+
+    # 複数URLをリストで取得
+    image_urls = get_photo_tour_images_by_cleaning_id(token, cid)
+    cleaning_data["urls"] = image_urls  # リストをそのまま詰める
+
+    return cleaning_data
+
+
+def enrich_multiple_cleanings_with_images(token: str, cleaning_list: list) -> list:
+    """
+    清掃データ(複数) に対して、全ての画像URLを付与。
+    "urls" キーに [url1, url2, ...] が入る形で返す。
+    """
+    enriched = []
+    for c in cleaning_list:
+        new_c = add_images_to_cleaning(token, c)
+        enriched.append(new_c)
+    return enriched
+
+def extract_common_area_and_urls(enriched_cleanings: list) -> list:
+    """
+    enriched_cleanings から 'placementId' と 'urls' のみを抽出し、両方が空でない場合のみ 
+    新しいリストに追加する。
+    """
+    extracted_data = []
+    for cleaning in enriched_cleanings:
+        placement_id = cleaning.get("placementId")
+        common_area_name = cleaning.get("commonAreaName")
+        urls = cleaning.get("urls")
+        cleaning_id = cleaning.get("id")
+
+        # placementId と urls がどちらも空でない場合のみ追加
+        if placement_id or urls:
+            extracted_data.append({
+                "placementId": placement_id,
+                "commonAreaName": common_area_name,
+                "urls": urls,
+                "id": cleaning_id
+            })
+    
+    return extracted_data
+
+
+
+
+
+# 1) クラス判定を行うエンドポイント (Trash_id_AI)
+URL_JUDGE = "https://us-central1-m2m-core.cloudfunctions.net/Trash_id_AI"
+
+# 2) 判定結果が「ストッカー」だった場合に呼び出すエンドポイント
+URL_STOCKER = "https://us-central1-m2m-core.cloudfunctions.net/Trash_stocker_id_AI"
+
+# 3) 判定結果が「ゴミ庫」だった場合に呼び出すエンドポイント
+URL_PLACE = "https://us-central1-m2m-core.cloudfunctions.net/Trash_place_id_AI"
+
+def judge_trash(image_urls: list, placement_id: str ,unique_name: str, cleaning_id: str) -> list:
+    """
+    複数の画像URLと個別IDを受け取り、
+      1) Trash_id_AI で「ゴミ庫 or ストッカー」判定
+      2) 「ストッカー」なら Trash_stocker_id_AI、「ゴミ庫」なら Trash_place_id_AI に再送
+      3) 「ストッカー〇 / ゴミ庫〇」なら「〇」、「ストッカー× / ゴミ庫×」なら「×」に共通化
+    を行って、結果をリストで返す。
+
+    戻り値:
+    [
+      {
+        "url": image_url,
+        "result": "〇" or "×" or "その他文字列",
+        "id": placement_id
+      },
+      ...
+    ]
+    """
+    results = []
+    
+    for image_url in image_urls:
+        # (A) 1回目: ゴミ庫/ストッカーを判定
+        payload = {"urls": [image_url]}
+        response_judge = requests.post(URL_JUDGE, json=payload)
+        response_judge_data = response_judge.json()
+        
+        # もし results が空なら、想定外のレスポンスとして終了
+        results_first = response_judge_data.get("results", [])
+        if not results_first:
+            results.append({
+                "url": image_url,
+                "result": "判定不可 (1回目の結果なし)",
+                "placement_id": placement_id,
+                "name": unique_name,
+                "cleaning_id": cleaning_id
+            })
+            continue  # 次の画像へ
+
+        # 1件だけ取り出し (複数ある場合はループでも可)
+        first_item = results_first[0]
+        first_result_label = first_item.get("result", "")  # 例: "ストッカー" or "ゴミ庫"
+        
+        # (B) 2回目の判定: ストッカー or ゴミ庫 用エンドポイントへ送信
+        final_result = "不明"
+        
+        if first_result_label == "ストッカー":
+            # ストッカー用のAIに再送
+            resp = requests.post(URL_STOCKER, json=payload)
+            resp_data = resp.json()
+            
+            results_second = resp_data.get("results", [])
+            if results_second:
+                second_label = results_second[0].get("result", "")
+                # "ストッカー〇" / "ストッカー×" → "〇" / "×" に共通化
+                if second_label.endswith("〇"):
+                    final_result = "〇"
+                elif second_label.endswith("×"):
+                    final_result = "×"
+                else:
+                    final_result = second_label  # 想定外の場合そのまま保持
+            else: 
+                final_result = "判定不可 (2回目のストッカー結果なし)"
+        
+        elif first_result_label == "ゴミ庫":
+            # ゴミ庫用のAIに再送
+            resp = requests.post(URL_PLACE, json=payload)
+            resp_data = resp.json()
+            
+            results_second = resp_data.get("results", [])
+            if results_second:
+                second_label = results_second[0].get("result", "")
+                # "ゴミ庫〇" / "ゴミ庫×" → "〇" / "×" に共通化
+                if second_label.endswith("〇"):
+                    final_result = "〇"
+                elif second_label.endswith("×"):
+                    final_result = "×"
+                else:
+                    final_result = second_label
+            else:
+                final_result = "判定不可 (2回目のゴミ庫結果なし)"
+        
+        else:
+            # 1回目の判定ラベルが「ストッカー」「ゴミ庫」以外だったら
+            final_result = f"予想外のラベル: {first_result_label}"
+
+        # (C) 結果をリストに追加
+        results.append({
+            "url": image_url,
+            "result": final_result,
+            "placement_id": placement_id,
+            "name": unique_name,
+            "cleaning_id": cleaning_id
+        })
+    
+    return results
+
+def filter_success_results(results: list) -> list:
+    """結果リストから「〇」のみを抽出"""
+    return [item for item in results if item.get("result") == "〇"]
+
+
+
+
+import os
+import json
+from google.auth.transport.requests import Request
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from datetime import datetime
+
+# サービスアカウント認証
+SERVICE_ACCOUNT_FILE = 'service-account-key.json'  # アップロードしたJSONキーのパス
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+# 認証の取得
+creds = service_account.Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+
+# Sheets APIを利用するためのサービスオブジェクトを作成
+service = build('sheets', 'v4', credentials=creds)
+
+# スプレッドシートのID
+spreadsheet_id = '1cV_8DH4wLZu7--J9vxIH0rFf7upKa1cKACyDNaONxp0'  # ここに使用するスプレッドシートIDを指定
+
+def clear_sheet(sheet_name):
+    """
+    指定したシートをクリアする関数
+    """
+    range_name = f'{sheet_name}!A1:E'  # A1からE列までをクリア
+    request = service.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=range_name)
+    response = request.execute()
+    return response
+
+def write_to_sheet(data, sheet_name):
+    """
+    final_resultのデータを指定したGoogle Sheetsのシートに書き込む関数
+    """
+    # シートをクリア
+    clear_sheet(sheet_name)
+
+    range_name = f'{sheet_name}!A1:E'  # 書き込む範囲を指定 (A1からE列)
+    
+    # 1行目にヘッダーを設定
+    header = ['Cleaning ID', 'Name', 'Placement ID', 'Result', 'URL']
+    values = [header]
+    
+    # `data` から値を取り出してリストに追加
+    for item in data:
+        row = [item.get('cleaning_id'), item.get('name'), item.get('placement_id'), item.get('result'), item.get('url')]
+        values.append(row)
+    
+    # Sheets APIにデータを書き込む
+    request = service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id, range=range_name,
+        valueInputOption="RAW", body={"values": values}
+    )
+    response = request.execute()
+    return response
+
+
+
+
+def main(request):
+    """
+    メインの処理:
+      1) トークン取得
+      2) 当日の清掃データを取得 (特定 photoTourId に該当)
+      3) 画像URLリストを追加
+      4) 結果を表示
+    """
+    # 1) トークン取得
+    token = get_api_token()
+    if not token:
+        print("[ERROR] Could not retrieve token. Exiting.")
+        return
+
+    # 2) 当日の清掃データを取得 (例: photoTourId = "0a8b54c9-1d99-460b-9085-4bdfe56af9ce")
+    target_photo_tour_id = "0a8b54c9-1d99-460b-9085-4bdfe56af9ce"
+    filtered_cleanings = get_today_cleanings(token, target_photo_tour_id)
+
+    if not filtered_cleanings:
+        print("[ERROR] No cleanings found for the given photoTourId.")
+        return
+
+    # 3) 複数の清掃に対して画像URLを追加
+    ai_data = enrich_multiple_cleanings_with_images(token, filtered_cleanings)
+
+    if not ai_data:
+        print("[ERROR] No AI data available after enrichment.")
+        return
+
+    # 4) AIに投げるJSONに編集する
+    ai_data = extract_common_area_and_urls(ai_data)
+    print("[INFO] Final data with multiple images (urls):")
+    print(json.dumps(ai_data, ensure_ascii=False, indent=2))
+
+    # 5) AIにデータを投げる
+    result = []  # 結果を格納するリスト
+    for cleaning in ai_data:
+        image_urls = cleaning["urls"]
+        placement_id = cleaning["placementId"]
+        commonarea_name = cleaning["commonAreaName"]
+        cleaning_id = cleaning["id"]
+        
+        for url in image_urls:
+            # AI結果を取得
+            judge_result = judge_trash([url], placement_id, commonarea_name, cleaning_id)
+            if judge_result:
+                result.extend(judge_result)  # 画像ごとに判定結果を追加
+
+    # 6) 結果を最終的に表示または保存する
+    print("[INFO] Final judgment result:")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    # 7) 「〇」のみをフィルタリング
+    success_results = filter_success_results(result)
+    print("\n[INFO] Success results (〇 only):")
+    print(json.dumps(success_results, ensure_ascii=False, indent=2))
+
+    # 8) 最終的に1つの辞書として返す
+    final_result = {
+        "result": result,
+        "success_results": success_results
+    }
+
+        # `final_result["result"]` をGoogle Sheetsの「判定一覧」シートに書き込む
+    write_to_sheet(final_result["result"], sheet_name="判定一覧")
+    
+    # `final_result["success_results"]` をGoogle Sheetsの「回収必要」シートに書き込む
+    write_to_sheet(final_result["success_results"], sheet_name="回収必要")
+
+    return final_result
