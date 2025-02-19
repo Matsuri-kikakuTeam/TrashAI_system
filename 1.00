@@ -1,6 +1,7 @@
 import requests
 import json
 from datetime import datetime
+from google.cloud import bigquery
 
 def get_api_token():
     """
@@ -376,47 +377,106 @@ def write_to_sheet(data, sheet_name="判定一覧"):
     """
     final_resultのデータを指定したGoogle Sheetsのシートに書き込む関数
     """
-    range_name = f'{sheet_name}!A2:G'  # 書き込む範囲を指定 (A1からG列)
+    # 範囲を変更して、J列にデータを書き込むようにします。
+    range_name = f'{sheet_name}!A2:J'  # 書き込む範囲をA2からJ列に変更
 
-    # 1行目にヘッダーを設定（新しく"commonAreaId"列も追加）
-    header = ['Cleaning ID', 'Name', 'Placement ID', 'Result', 'URL', 'Object', 'Common Area ID']
+    # 1行目にヘッダーを設定（"unique_id"、"date"、"time"を追加）
+    header = ['Unique ID', 'Cleaning ID', 'Name', 'Placement ID', 'Result', 'URL', 'Object', 'Common Area ID', 'Date', 'Time']
     values = [header]
 
     # `data` から値を取り出してリストに追加
     for item in data:
+        # resultの値を「〇」なら1、「×」なら0に変換
+        result_value = 1 if item.get('result') == '〇' else 0 if item.get('result') == '×' else None
+        
+        # 行のデータに unique_id を含める
         row = [
-            item.get('cleaning_id'),   # Cleaning ID
-            item.get('name'),          # Name
-            item.get('placement_id'),  # Placement ID
-            item.get('result'),        # Result (〇 or ×)
-            item.get('url'),           # URL
-            item.get('object', ''),    # Object (判定結果: ストッカー or ゴミ庫)
-            item.get('commonAreaId', '')  # CommonAresID
+            item.get('unique_id', ''),   # Unique ID
+            item.get('cleaning_id'),     # Cleaning ID
+            item.get('name'),            # Name
+            item.get('placement_id'),    # Placement ID
+            result_value,                # Result (〇なら1, ×なら0)
+            item.get('url'),             # URL
+            item.get('object', ''),      # Object (判定結果: ストッカー or ゴミ庫)
+            item.get('commonAreaId', ''), # CommonAresID
+
         ]
         values.append(row)
 
-    # Sheets APIにデータを書き込む
-    request = service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id, range=range_name,
-        valueInputOption="RAW", body={"values": values}
-    )
-    response = request.execute()
+    try:
+        # Sheets APIにデータを書き込む
+        request = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=range_name,
+            valueInputOption="RAW", body={"values": values}
+        )
+        response = request.execute()
+        print("[INFO] Data written to sheet successfully.")
+        print(response)  # レスポンスの確認用ログ
 
-    # 「判別終了」をI2セルに表示
-    update_status_range = "判定一覧!I2"
-    update_status_values = [["判別終了"]]
+        # 「判別終了」をI2セルに表示
+        update_status_range = "判定一覧!K3"
+        update_status_values = [["判別終了"]]
 
-    request_status = service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id, range=update_status_range,
-        valueInputOption="RAW", body={"values": update_status_values}
-    )
-    request_status.execute()  # 実行
-
+        request_status = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=update_status_range,
+            valueInputOption="RAW", body={"values": update_status_values}
+        )
+        request_status.execute()  # 実行
+        print("[INFO] Status updated to '判別終了'.")
+    except Exception as e:
+        print(f"[ERROR] Failed to write to Google Sheets: {e}")
+    
     return response
 
 
 
 
+
+from datetime import datetime
+from google.cloud import bigquery
+
+def insert_results_to_bigquery(results, table_id):
+    """
+    結果データ (results: リスト形式の辞書) を BigQuery の指定テーブルにインサートする関数。
+    table_id は "project.dataset.table" の形式で指定します。
+    """
+    # BigQueryクライアントの作成。認証は環境変数または明示的なキー指定により行う
+    client = bigquery.Client()
+
+    # 現在の日時を取得
+    current_datetime = datetime.now()
+    current_date = current_datetime.strftime('%Y-%m-%d')  # 日付のフォーマット: YYYY-MM-DD
+    current_time = current_datetime.strftime('%H:%M:%S')  # 時間のフォーマット: HH:MM:SS
+    current_timestamp = current_datetime.isoformat()  # ISOフォーマットでタイムスタンプを生成
+
+    # 結果データに date と time を追加（unique_id はすでに main で追加されている）
+    for result in results:
+        result["date"] = current_date
+        result["time"] = current_time
+        result["timestamp"] = current_timestamp  # タイムスタンプを追加
+
+        # resultの値を「〇」なら1、「×」なら0に変換
+        if result["result"] == "〇":
+            result["result"] = 1
+        elif result["result"] == "×":
+            result["result"] = 0
+        else:
+            result["result"] = None  # もし他の値があればNoneをセットする（任意）
+
+    # BigQueryにデータをインサート
+    errors = client.insert_rows_json(table_id, results)
+    if errors:
+        print("BigQueryへのインサート中にエラーが発生しました:", errors)
+    else:
+        print("BigQueryに正常にインサートされました。")
+
+
+
+
+
+
+
+import uuid
 
 def main(request):
     """
@@ -466,22 +526,27 @@ def main(request):
         common_area_id = cleaning["commonAreaId"]  # commonAreaIdを取得
         print(f"[INFO] Processing cleaning_id: {cleaning_id} with commonAreaId: {common_area_id}")
 
+        # 6) 各画像に対して判定を行い、結果を格納
         for url in image_urls:
             # AI結果を取得
             judge_result = judge_trash([url], placement_id, commonarea_name, cleaning_id, common_area_id)
             if judge_result:
                 result.extend(judge_result)  # 画像ごとに判定結果を追加
 
-    # 6) 結果を最終的に表示または保存する
+    # 7) 結果を最終的に表示または保存する
     print("[INFO] Final judgment result:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
-    # 7) 「〇」のみをフィルタリング
+    # 8) 「〇」のみをフィルタリング
     success_results = filter_success_results(result)
     print("\n[INFO] Success results (〇 only):")
     print(json.dumps(success_results, ensure_ascii=False, indent=2))
 
-    # 8) 最終的に1つの辞書として返す
+    # 9) unique_idを生成して結果に追加
+    for item in result:
+        item["unique_id"] = str(uuid.uuid4())  # unique_idを生成し、各エントリーに追加
+
+    # 10) 最終的に1つの辞書として返す
     final_result = {
         "result": result,
         "success_results": success_results
@@ -490,5 +555,9 @@ def main(request):
     # `final_result["result"]` をGoogle Sheetsの「判定一覧」シートに書き込む
     write_to_sheet(final_result["result"], sheet_name="判定一覧")
 
+    # BigQueryにインサート
+    table_id = "m2m-core.su_wo.trash_ai_results"
+    insert_results_to_bigquery(final_result["result"], table_id)
 
     return final_result
+
