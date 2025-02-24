@@ -1,7 +1,11 @@
+
+
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from google.cloud import bigquery
+import os
+from google.cloud import storage
 
 def get_api_token():
     """
@@ -14,7 +18,7 @@ def get_api_token():
 
     payload = {"email": mail, "password": password}
 
-    print("[INFO] === get_api_token: Start ===")
+    print("[INFO] === get_api_token: 開始 ===")
     try:
         response = requests.post(url, json=payload)
         print("[DEBUG] Login response status code:", response.status_code)
@@ -22,21 +26,21 @@ def get_api_token():
             json_data = response.json()
             token = json_data.get('accessToken')
             if token:
-                print("[INFO] Successfully retrieved token.")
+                print("[INFO] トークン取得成功")
                 print("[DEBUG] Token (first 20 chars):", token[:20], "...")
                 print("[INFO] === get_api_token: End ===\n")
                 return token
             else:
-                print("[ERROR] Token not found in response.")
+                print("[ERROR] トークンが見つかりません")
                 print("[INFO] === get_api_token: End ===\n")
                 return None
         else:
-            print("[ERROR] Failed to get token:", response.text)
+            print("[ERROR] トークン取得失敗", response.text)
             print("[INFO] === get_api_token: End ===\n")
             return None
     except requests.exceptions.RequestException as e:
         print("[ERROR] Exception in get_api_token:", e)
-        print("[INFO] === get_api_token: End ===\n")
+        print("[INFO] === get_api_token: 終了 ===\n")
         return None
 
 
@@ -44,21 +48,26 @@ def get_today_cleanings(token: str, target_photo_tour_id: str) -> list:
     """
     Bearer token を用いて、当日の清掃情報を取得。
     さらに photoTourId == target_photo_tour_id のものだけを抽出。
-
-    - 日付は固定で "2025-01-28" に設定
-    - 戻り値: [{"id":..., "photoTourId":..., ...}, ...]
     """
-    print("[INFO] === get_today_cleanings: Start ===")
+    print("[INFO] === get_today_cleanings: 開始 ===")
     url = "https://api-cleaning.m2msystems.cloud/v4/operations/search"
     print("[DEBUG] Cleaning search URL:", url)
 
-    # 今日の日付(固定。必要に応じて動的にdatetime.now().strftime("%Y-%m-%d")に変更)
-    today_str = datetime.today().strftime('%Y-%m-%d')
+    # 現在のUTC時間を取得
+    current_datetime = datetime.utcnow()
+
+    # 日本時間に調整 (UTC + 9時間)
+    japan_datetime = current_datetime + timedelta(hours=9)
+
+    # 日本時間での今日の日付を取得
+    today_str = japan_datetime.strftime('%Y-%m-%d')
     print("[DEBUG] Target date:", today_str)
 
+    # ペイロードの作成
     payload = {
         "startDate": today_str,
-        "endDate": today_str
+        "endDate": today_str,
+        "photoTourIds": [target_photo_tour_id]  # 引数で指定された photoTourId を絞り込む
     }
     print("[DEBUG] Request payload:", payload)
 
@@ -68,7 +77,7 @@ def get_today_cleanings(token: str, target_photo_tour_id: str) -> list:
     }
 
     try:
-        print("[INFO] Sending POST request for cleaning list...")
+        print("[INFO] m2mにPOSTリクエストを行い、本日のゴミチェックツアーを取得します")
         response = requests.post(url, headers=headers, json=payload)
         print("[DEBUG] Response status code:", response.status_code)
         # ログが長くなる場合は部分的に表示
@@ -81,89 +90,162 @@ def get_today_cleanings(token: str, target_photo_tour_id: str) -> list:
                 print("[INFO] === get_today_cleanings: End ===\n")
                 return []
 
-            print(f"[DEBUG] Total cleanings count: {len(data)}")
+            print(f"[DEBUG] 取得したゴミチェックのツアー数: {len(data)}")
 
-            # (A) フィルタ: photoTourId == target_photo_tour_id
-            filtered = []
+            # フィルタリング済みなので、ここでの追加処理は不要
+            cleaned_data = []
             for c in data:
-                if c.get("photoTourId") == target_photo_tour_id:
-                    # 必要なキーだけ取り出してもよいし、このまま全要素を保持してもOK
-                    filtered.append({
-                        "id": c.get("id"),
-                        "photoTourId": c.get("photoTourId"),
-                        "placementId": c.get("placementId"),
-                        "commonAreaName": c.get("commonAreaName"),
-                        "status": c.get("status"),
-                        "cleaningDate": c.get("cleaningDate"),
-                        # 他にも必要なら追加
-                    })
+                cleaned_data.append({
+                    "id": c.get("id"),
+                    "photoTourId": c.get("photoTourId"),
+                    "placementId": c.get("placementId"),
+                    "commonAreaName": c.get("commonAreaName"),
+                    "status": c.get("status"),
+                    "cleaningDate": c.get("cleaningDate"),
+                    # 他にも必要なら追加
+                })
 
-            print(f"[DEBUG] Filtered by photoTourId='{target_photo_tour_id}'. Count: {len(filtered)}")
-
-            print("[INFO] === get_today_cleanings: End ===\n")
-            return filtered
+            print("[INFO] === get_today_cleanings: 終了 ===\n")
+            return cleaned_data
         else:
             print("[ERROR] Server returned error while getting cleanings:", response.text)
-            print("[INFO] === get_today_cleanings: End ===\n")
+            print("[INFO] === get_today_cleanings: 終了 ===\n")
             return []
     except requests.exceptions.RequestException as e:
         print("[ERROR] Exception in get_today_cleanings:", e)
-        print("[INFO] === get_today_cleanings: End ===\n")
+        print("[INFO] === get_today_cleanings: 終了 ===\n")
         return []
 
 
-def get_commonAreaId(token: str, cleaning_data: dict) -> dict:
-    operation_id = cleaning_data.get("id")
-    if not operation_id:
-        print("[ERROR] Cleaning data does not contain 'id'. Cannot retrieve commonAreaId.")
-        return cleaning_data
 
-    url = f"https://api-cleaning.m2msystems.cloud/v4/operations/{operation_id}"
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json"
-    }
 
-    try:
-        response = requests.get(url, headers=headers)
 
-        if response.status_code == 200:
-            print("[INFO] Successfully retrieved operation data.")
-            data = response.json()
-            # 'commonAreaId' を取得
-            common_area_id = data.get('commonAreaId', None)
-            if common_area_id:
-                cleaning_data["commonAreaId"] = common_area_id  # commonAreaIdを追加
-                return cleaning_data
-            else:
-                print("[ERROR] commonAreaId not found in response.")
-                return cleaning_data
+def get_collecting_and_commonarea_id():
+    """
+    明日の日付に基づいた曜日に対応するデータを取得する。
+    """
+    # 自分のプロジェクトIDを指定
+    project_id = 'm2m-core'
+
+    # BigQueryクライアントを作成（リージョンを指定）
+    client = bigquery.Client(project=project_id, location='asia-northeast1')  # リージョンを指定
+
+    # 実行するSQLクエリ
+    sql = """
+    WITH weekday_info AS (
+      SELECT
+        pl.placement_id,
+        col.building_id,
+        col.building_name,
+        pl.common_area_id,
+        pl.common_area_name,
+        col.friday,
+        col.monday,
+        col.saturday,
+        col.thursday,
+        col.tuesday,
+        col.wednesday,
+        CASE
+          WHEN EXTRACT(DAYOFWEEK FROM CURRENT_DATE() + INTERVAL 1 DAY) = 1 THEN 'friday'
+          WHEN EXTRACT(DAYOFWEEK FROM CURRENT_DATE() + INTERVAL 1 DAY) = 2 THEN 'monday'
+          WHEN EXTRACT(DAYOFWEEK FROM CURRENT_DATE() + INTERVAL 1 DAY) = 3 THEN 'tuesday'
+          WHEN EXTRACT(DAYOFWEEK FROM CURRENT_DATE() + INTERVAL 1 DAY) = 4 THEN 'wednesday'
+          WHEN EXTRACT(DAYOFWEEK FROM CURRENT_DATE() + INTERVAL 1 DAY) = 5 THEN 'thursday'
+          WHEN EXTRACT(DAYOFWEEK FROM CURRENT_DATE() + INTERVAL 1 DAY) = 6 THEN 'friday'
+          WHEN EXTRACT(DAYOFWEEK FROM CURRENT_DATE() + INTERVAL 1 DAY) = 7 THEN 'saturday'
+        END AS tomorrow_column
+      FROM `m2m-core.su_wo.placement_relations` AS pl
+      LEFT JOIN `m2m-core.su_wo.trash collection` AS col
+        ON pl.property_id = col.building_id
+    )
+
+    SELECT
+      placement_id,
+      building_id,
+      building_name,
+      common_area_id,
+      common_area_name,
+      CASE
+        WHEN tomorrow_column = 'friday' THEN friday
+        WHEN tomorrow_column = 'monday' THEN monday
+        WHEN tomorrow_column = 'tuesday' THEN tuesday
+        WHEN tomorrow_column = 'wednesday' THEN wednesday
+        WHEN tomorrow_column = 'thursday' THEN thursday
+        WHEN tomorrow_column = 'saturday' THEN saturday
+      END AS tomorrow_column_value
+    FROM weekday_info
+    WHERE common_area_id IS NOT NULL
+    """
+
+    # SQLクエリを実行
+    query_job = client.query(sql)
+
+    # 結果を取得
+    results = query_job.result()
+
+    # placement_data 辞書にデータを格納
+    placement_data = {}
+
+    for row in results:
+        # placement_id をキーにしてデータを格納
+        placement_data[row.placement_id] = {
+            "placementId": row.placement_id,
+            "common_area_id": row.common_area_id,
+            "commonAreaName": row.common_area_name,
+            "tomorrow_column_value": row.tomorrow_column_value,
+            "building_id": row.building_id,
+            "building_name": row.building_name,
+        }
+
+    return placement_data
+
+
+def add_collecting_and_commonarea_id(cleanings: list, placement_data: dict) -> list:
+    """
+    清掃データに placement_records の情報を追加する。
+    """
+    for cleaning in cleanings:
+        placement_id = cleaning.get("placementId")
+
+        # placement_idに基づきplacement_dataから情報を取得
+        placement_info = placement_data.get(placement_id, {})
+
+        # placement_info が見つかった場合、関連する情報を清掃データに追加
+        if placement_info:
+            cleaning.update(placement_info)
+
         else:
-            print(f"[ERROR] Failed to retrieve data. Status Code: {response.status_code}")
-            print("[DEBUG] Response:", response.text)
-            return cleaning_data
+            print(f"[WARN] placement_id {placement_id} not found in placement_data.")
 
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Request failed: {e}")
-        return cleaning_data
+    return cleanings
 
-def enrich_cleaning_data_with_common_area_id(token: str, cleaning_data: dict) -> dict:
+def filter_cleanings_by_tomorrow_column_value(cleanings: list) -> list:
     """
-    清掃データに対して commonAreaId を追加する処理。
+    enriched_cleanings リストから tomorrow_column_value が None のものを残し、
+    それ以外のデータを省く。
+    また、省かれたデータの building_id をデバッグ出力する。
     """
-    enriched_data = get_commonAreaId(token, cleaning_data)
-    return enriched_data
+    filtered_cleanings = []
+    excluded_cleanings = []  # To store excluded cleanings for debug output
 
-def enrich_multiple_cleanings_with_common_area_id(token: str, cleaning_list: list) -> list:
-    """
-    清掃データ(複数) に対して全ての commonAreaId を付与する処理。
-    """
-    enriched = []
-    for cleaning in cleaning_list:
-        enriched.append(enrich_cleaning_data_with_common_area_id(token, cleaning))
-    return enriched
+    for cleaning in cleanings:
+        if cleaning.get("tomorrow_column_value") is None:
+            filtered_cleanings.append(cleaning)
+        else:
+            excluded_cleanings.append(cleaning)
 
+    # Debug output for excluded properties
+    if excluded_cleanings:
+        print("[INFO] 明日回収があるため以下の物件が省かれました:")
+        for cleaning in excluded_cleanings:
+            commonAreaName = cleaning.get("commonAreaName")
+            if commonAreaName:
+                print(f"- {commonAreaName}")
+            else:
+                print("[DEBUG] Excluded cleaning with missing building_id")
+
+    return filtered_cleanings,excluded_cleanings
 
 
 def get_photo_tour_images_by_cleaning_id(token: str, cleaning_id: str) -> list:
@@ -172,10 +254,8 @@ def get_photo_tour_images_by_cleaning_id(token: str, cleaning_id: str) -> list:
     レスポンスは {"images": [...] } の構造を想定し、
     各要素の "url" をリスト化して返す。
     """
-    print(f"[INFO] === get_photo_tour_images_by_cleaning_id({cleaning_id}): Start ===")
 
     url = f"https://api-cleaning.m2msystems.cloud/v3/photo_tour_images/by_cleaning_id/{cleaning_id}"
-    print("[DEBUG] GET URL:", url)
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -184,8 +264,8 @@ def get_photo_tour_images_by_cleaning_id(token: str, cleaning_id: str) -> list:
 
     try:
         response = requests.get(url, headers=headers)
-        print("[DEBUG] Status Code:", response.status_code)
-        print("[DEBUG] Response text (partial):", response.text[:300], "...")
+        # print("[DEBUG] Status Code:", response.status_code)
+        # print("[DEBUG] Response text (partial):", response.text[:300], "...")
         if response.status_code == 200:
             data = response.json()
             # data = { "images": [ { "id":..., "url":... }, ... ] }
@@ -200,16 +280,12 @@ def get_photo_tour_images_by_cleaning_id(token: str, cleaning_id: str) -> list:
                 if url_value:
                     urls.append(url_value)
 
-            print(f"[INFO] Found {len(urls)} image(s).")
-            print("[INFO] === get_photo_tour_images_by_cleaning_id: End ===\n")
             return urls
         else:
-            print("[ERROR] Server returned an error:", response.text)
-            print("[INFO] === get_photo_tour_images_by_cleaning_id: End ===\n")
+
             return []
     except requests.RequestException as e:
         print("[ERROR] Request exception:", e)
-        print("[INFO] === get_photo_tour_images_by_cleaning_id: End ===\n")
         return []
 
 
@@ -244,9 +320,6 @@ def enrich_multiple_cleanings_with_images(token: str, cleaning_list: list) -> li
 
 
 
-
-
-
 # 1) クラス判定を行うエンドポイント (Trash_id_AI)
 URL_JUDGE = "https://us-central1-m2m-core.cloudfunctions.net/Trash_id_AI"
 
@@ -256,7 +329,7 @@ URL_STOCKER = "https://us-central1-m2m-core.cloudfunctions.net/Trash_stocker_id_
 # 3) 判定結果が「ゴミ庫」だった場合に呼び出すエンドポイント
 URL_PLACE = "https://us-central1-m2m-core.cloudfunctions.net/Trash_place_id_AI"
 
-def judge_trash(image_urls: list, placement_id: str, unique_name: str, cleaning_id: str, common_area_id: str) -> list:
+def judge_trash(image_urls: list) -> list:
     """
     複数の画像URLと個別IDを受け取り、判定を行う。
     画像URLが空の場合は判定をスキップするが、空の場合にも結果を出力する。
@@ -269,9 +342,6 @@ def judge_trash(image_urls: list, placement_id: str, unique_name: str, cleaning_
                 "url": "",
                 "object": "画像無し",  # 画像がない場合
                 "result": "画像無し",  # 画像がない場合
-                "placement_id": placement_id,
-                "name": unique_name,
-                "cleaning_id": cleaning_id
             })
             continue  # 次の画像へ
 
@@ -286,9 +356,6 @@ def judge_trash(image_urls: list, placement_id: str, unique_name: str, cleaning_
             results.append({
                 "url": image_url,
                 "result": "判定不可 (1回目の結果なし)",
-                "placement_id": placement_id,
-                "name": unique_name,
-                "cleaning_id": cleaning_id
             })
             continue  # 次の画像へ
 
@@ -337,134 +404,359 @@ def judge_trash(image_urls: list, placement_id: str, unique_name: str, cleaning_
             "url": image_url,
             "object": first_result_label,
             "result": final_result,
-            "placement_id": placement_id,
-            "commonAreaId":common_area_id,
-            "name": unique_name,
-            "cleaning_id": cleaning_id
         })
 
     return results
 
 
-
-def filter_success_results(results: list) -> list:
-    """結果リストから「〇」のみを抽出"""
-    return [item for item in results if item.get("result") == "〇"]
-
-
-import os
 import json
+from datetime import datetime, timedelta
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from datetime import datetime
+import os
 
-# サービスアカウント認証
+# Google Sheets APIの設定
 SERVICE_ACCOUNT_FILE = 'm2m-core-08fd5de67ae7.json'  # アップロードしたJSONキーのパス
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
-# 認証の取得
+# サービスアカウントを使用して認証
 creds = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 
-# Sheets APIを利用するためのサービスオブジェクトを作成
+# Google Sheetsのサービスオブジェクト
 service = build('sheets', 'v4', credentials=creds)
 
 # スプレッドシートのID
-spreadsheet_id = '1cV_8DH4wLZu7--J9vxIH0rFf7upKa1cKACyDNaONxp0'  # ここに使用するスプレッドシートIDを指定
+spreadsheet_id = '1cV_8DH4wLZu7--J9vxIH0rFf7upKa1cKACyDNaONxp0'  # 使用するスプレッドシートのID
 
+# 日本時間を取得する関数
+def get_japan_time():
+    current_datetime = datetime.now()
+    japan_datetime = current_datetime + timedelta(hours=9)  # UTC+9時間で日本時間に調整
+    return japan_datetime.strftime('%Y-%m-%d %H:%M:%S')  # 日本時間のフォーマットで返す
+
+# Google Sheetsにデータを書き込む関数
 def write_to_sheet(data, sheet_name="判定一覧"):
     """
     final_resultのデータを指定したGoogle Sheetsのシートに書き込む関数
     """
-    # 範囲を変更して、J列にデータを書き込むようにします。
-    range_name = f'{sheet_name}!A2:J'  # 書き込む範囲をA2からJ列に変更
+    # 書き込む範囲をA2からF列に設定
+    range_name = f'{sheet_name}!A2:F'  # 書き込む範囲をA2からF列に変更
 
-    # 1行目にヘッダーを設定（"unique_id"、"date"、"time"を追加）
-    header = ['Unique ID', 'Cleaning ID', 'Name', 'Placement ID', 'Result', 'URL', 'Object', 'Common Area ID', 'Date', 'Time']
+    # ヘッダーの設定
+    header = ['cleaning_id', 'name', 'result', 'object', 'picture_url', 'm2m_url']
     values = [header]
 
     # `data` から値を取り出してリストに追加
     for item in data:
-        # resultの値を「〇」なら1、「×」なら0に変換
-        result_value = 1 if item.get('result') == '〇' else 0 if item.get('result') == '×' else None
-        
-        # 行のデータに unique_id を含める
-        row = [
-            item.get('unique_id', ''),   # Unique ID
-            item.get('cleaning_id'),     # Cleaning ID
-            item.get('name'),            # Name
-            item.get('placement_id'),    # Placement ID
-            result_value,                # Result (〇なら1, ×なら0)
-            item.get('url'),             # URL
-            item.get('object', ''),      # Object (判定結果: ストッカー or ゴミ庫)
-            item.get('commonAreaId', ''), # CommonAresID
+        cleaning_id = item.get('id', '')  # Cleaning ID
+        name = item.get('commonAreaName', '')  # Common Area Name
 
-        ]
-        values.append(row)
+        # 各judgmentのデータを処理
+        for judgment in item.get('judgments', []):
+            result_value = judgment.get('result', '')  # '〇' または '×' をそのまま取得
+            m2m_url = f"https://manager-cleaning.m2msystems.cloud/operations/{cleaning_id}"  # URLを生成
+
+            row = [
+                cleaning_id,             # Cleaning ID
+                name,                    # Name
+                result_value,            # Result ('〇' または '×')
+                judgment.get('object', ''),  # Object (判定結果: "ストッカー" または "ゴミ庫")
+                judgment.get('url', ''),  # URL
+                m2m_url
+            ]
+            values.append(row)
 
     try:
+        # 範囲をクリア
+        clear_range = f'{sheet_name}!A2:H'
+        service.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=clear_range).execute()
+        print("[INFO] シートの範囲をクリアしました。")
+
         # Sheets APIにデータを書き込む
         request = service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id, range=range_name,
             valueInputOption="RAW", body={"values": values}
         )
         response = request.execute()
-        print("[INFO] Data written to sheet successfully.")
-        print(response)  # レスポンスの確認用ログ
+        print("[INFO] スプレッドシートにデータを書き込みました。")
+        print(response)
 
-        # 「判別終了」をI2セルに表示
-        update_status_range = "判定一覧!K3"
+        # ステータスセルに「判別終了」を設定
+        update_status_range = "判定一覧!H3"
         update_status_values = [["判別終了"]]
-
         request_status = service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id, range=update_status_range,
             valueInputOption="RAW", body={"values": update_status_values}
         )
         request_status.execute()  # 実行
-        print("[INFO] Status updated to '判別終了'.")
+        print("[INFO] ステータスセルに「判別終了」を設定しました。")
+
+        # 実行時間を日本時間で取得
+        execution_time = get_japan_time()
+
+        # 実行時間をシートに追加
+        update_time_range = "判定一覧!H4"
+        update_time_values = [[execution_time]]
+        request_time = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=update_time_range,
+            valueInputOption="RAW", body={"values": update_time_values}
+        )
+        request_time.execute()  # 実行
+        print(f"[INFO] 実行時間をシートに追加しました: {execution_time}")
+
     except Exception as e:
-        print(f"[ERROR] Failed to write to Google Sheets: {e}")
-    
-    return response
+        print(f"[ERROR] Google Sheetsへの書き込みに失敗しました: {e}")
 
 
 
 
+import json
+from datetime import datetime, timedelta
+from google.auth.transport.requests import Request
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
-from datetime import datetime
+# Google Sheets APIの設定
+SERVICE_ACCOUNT_FILE = 'm2m-core-08fd5de67ae7.json'  # サービスアカウントのJSONキーのパス
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+# サービスアカウントを使用して認証
+creds = service_account.Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+
+# Google Sheetsのサービスオブジェクト
+service = build('sheets', 'v4', credentials=creds)
+
+# スプレッドシートのID
+spreadsheet_id = '1cV_8DH4wLZu7--J9vxIH0rFf7upKa1cKACyDNaONxp0'  # 使用するスプレッドシートのID
+
+# 日本時間を取得する関数
+def get_japan_time():
+    current_datetime = datetime.now()
+    japan_datetime = current_datetime + timedelta(hours=9)  # UTC+9時間で日本時間に調整
+    return japan_datetime.strftime('%Y-%m-%d %H:%M:%S')  # 日本時間のフォーマットで返す
+
+# Google Sheetsにデータを書き込む関数
+def write_to_sheet(data, sheet_name="判定一覧"):
+    """
+    Write the results of the cleaning data to the specified Google Sheets sheet.
+    """
+    if not data:
+        print("[INFO] No data to write to the sheet.")
+        return
+
+    range_name = f'{sheet_name}!A2:F'
+    header = ['cleaning_id', 'name', 'result', 'object', 'picture_url', 'm2m_url']
+    values = [header]
+
+    for item in data:
+        cleaning_id = item.get('id', '')
+        name = item.get('commonAreaName', '')
+        if not item.get('judgments'):
+            row = [
+                cleaning_id,
+                name,
+                '',
+                '',
+                '',
+                f"https://manager-cleaning.m2msystems.cloud/operations/{cleaning_id}"
+            ]
+            values.append(row)
+        else:
+            for judgment in item.get('judgments', []):
+                result_value = judgment.get('result', '')
+                m2m_url = f"https://manager-cleaning.m2msystems.cloud/operations/{cleaning_id}"
+                row = [
+                    cleaning_id,
+                    name,
+                    result_value,
+                    judgment.get('object', ''),
+                    judgment.get('url', ''),
+                    m2m_url
+                ]
+                values.append(row)
+    try:
+        clear_range = f'{sheet_name}!A2:H'
+        service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id, range=clear_range
+        ).execute()
+        print("[INFO] シートの範囲をクリアしました。")
+
+        request = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=range_name,
+            valueInputOption="RAW",
+            body={"values": values}
+        )
+        response = request.execute()
+        print("[INFO] スプレッドシートにデータを書き込みました。")
+        print("Response:", response)
+
+        update_status_range = "判定一覧!H3"
+        update_status_values = [["判別終了"]]
+        request_status = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=update_status_range,
+            valueInputOption="RAW",
+            body={"values": update_status_values}
+        )
+        request_status.execute()
+        print("[INFO] ステータスセルに「判別終了」を設定しました。")
+
+        execution_time = get_japan_time()
+        update_time_range = "判定一覧!H4"
+        update_time_values = [[execution_time]]
+        request_time = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=update_time_range,
+            valueInputOption="RAW",
+            body={"values": update_time_values}
+        )
+        request_time.execute()
+        print(f"[INFO] 実行時間をシートに追加しました: {execution_time}")
+    except Exception as e:
+        print("[ERROR] Google Sheetsへの書き込みに失敗しました:")
+        import traceback
+        traceback.print_exc()
+
+
+
 from google.cloud import bigquery
+from datetime import datetime, timedelta
+import pytz
 
-def insert_results_to_bigquery(results, table_id):
+def insert_results_to_bigquery(results):
     """
     結果データ (results: リスト形式の辞書) を BigQuery の指定テーブルにインサートする関数。
     table_id は "project.dataset.table" の形式で指定します。
     """
-    # BigQueryクライアントの作成。認証は環境変数または明示的なキー指定により行う
+    table_id = "m2m-core.su_wo.trash_ai_judging_result"
     client = bigquery.Client()
 
-    # 現在の日時を取得
+    # 結果データに日付・時刻情報を追加
     current_datetime = datetime.now()
-    current_date = current_datetime.strftime('%Y-%m-%d')  # 日付のフォーマット: YYYY-MM-DD
-    current_time = current_datetime.strftime('%H:%M:%S')  # 時間のフォーマット: HH:MM:SS
-    current_timestamp = current_datetime.isoformat()  # ISOフォーマットでタイムスタンプを生成
+    japan_datetime = current_datetime + timedelta(hours=9)
+    current_date = japan_datetime.strftime('%Y-%m-%d')
+    current_time = japan_datetime.strftime('%H:%M:%S')
+    jst = pytz.timezone('Asia/Tokyo')
+    now_jst = datetime.now(jst)
+    current_timestamp = now_jst.timestamp()
 
-    # 結果データに date と time を追加（unique_id はすでに main で追加されている）
     for result in results:
+        result.pop('tomorrow_column_value', None)
+        result.pop('status', None)
+        result.pop('urls', None)
+        result.pop('building_name', None)
+        result.pop('judgments', None)
+        result.pop('commonAreaName', None)
+        result.pop('cleaningDate', None)
+        result.pop('photoTourId', None)
+        result.pop('id', None)
+        result.pop('building_id', None)
+
         result["date"] = current_date
         result["time"] = current_time
-        result["timestamp"] = current_timestamp  # タイムスタンプを追加
+        result["timestamp"] = current_timestamp
 
-        # resultの値を「〇」なら1、「×」なら0に変換
-        if result["result"] == "〇":
+        result_value = result.get("result")
+        if result_value == "〇":
             result["result"] = 1
-        elif result["result"] == "×":
+        elif result_value == "×":
             result["result"] = 0
         else:
-            result["result"] = None  # もし他の値があればNoneをセットする（任意）
+            result["result"] = None
+
+        result["unique_id"] = result.get("unique_id", None)
+        result["cleaning_id"] = result.get("cleaning_id", None)
+        result["name"] = result.get("name", None)
+        result["placement_id"] = result.get("placementId", None)
+        result["object"] = result.get("object", None)
+        result["common_area_id"] = result.get("common_area_id", None)
+        result.pop('placementId', None)
+
+        print("[DEBUG] Insert row:", result)
+
+    try:
+        errors = client.insert_rows_json(table_id, results)
+        if errors:
+            print("[ERROR] BigQueryへのインサート中にエラーが発生しました:", errors)
+        else:
+            print("[INFO] BigQueryに正常にインサートされました。")
+    except Exception as e:
+        print("[ERROR] BigQueryへのデータ挿入処理で例外が発生しました:")
+        import traceback
+        traceback.print_exc()
+
+
+
+from google.cloud import bigquery
+from datetime import datetime
+import pytz
+import uuid
+
+def insert_results_to_bigquery(results):
+    """
+    結果データ (results: リスト形式の辞書) を BigQuery の指定テーブルにインサートする関数。
+    table_id は "project.dataset.table" の形式で指定します。
+    """
+
+    # BigQueryクライアントの作成。認証は環境変数または明示的なキー指定により行う
+    client = bigquery.Client()
+    table_id = "m2m-core.su_wo.trash_ai_judging_result"
+
+    # 結果データの変換
+    rows_to_insert = []
+    for result in results:
+        # unique_idをランダムに生成
+        unique_id = str(uuid.uuid4())
+        
+        # judgmentsからデータを抽出し、スキーマに合わせて変換
+        if result["judgments"]:
+            for judgment in result["judgments"]:
+                # timestampを日本時間に設定
+                timestamp = datetime.now(pytz.timezone('Asia/Tokyo'))
+                date = timestamp.date().isoformat()  # YYYY-MM-DD形式
+                time = timestamp.strftime("%H:%M")  # HH:MM形式に変更
+
+                row = {
+                    "unique_id": unique_id,
+                    "cleaning_id": result["id"],  # idをcleaning_idとして使用
+                    "name": result["commonAreaName"],
+                    "placement_id": result["placementId"],
+                    "result": 1 if judgment["result"] == "×" else 0,  # ×は1、それ以外は0
+                    "url": judgment["url"],
+                    "object": judgment["object"],
+                    "common_area_id": result["common_area_id"],
+                    "date": date,
+                    "time": time,
+                    "timestamp": timestamp.isoformat()  # 現在のタイムスタンプ
+                }
+                rows_to_insert.append(row)
+        else:
+            # judgmentsが空の場合でも1行挿入する場合の処理
+            timestamp = datetime.now(pytz.timezone('Asia/Tokyo'))
+            date = timestamp.date().isoformat()  # YYYY-MM-DD形式
+            time = timestamp.strftime("%H:%M")  # HH:MM形式に変更
+
+            row = {
+                "unique_id": unique_id,
+                "cleaning_id": result["id"],  # idをcleaning_idとして使用
+                "name": result["commonAreaName"],
+                "placement_id": result["placementId"],
+                "result": None,  # judgmentsがない場合はresultもNone
+                "url": None,
+                "object": None,
+                "common_area_id": result["common_area_id"],
+                "date": date,
+                "time": time,
+                "timestamp": timestamp.isoformat()
+            }
+            rows_to_insert.append(row)
 
     # BigQueryにデータをインサート
-    errors = client.insert_rows_json(table_id, results)
+    errors = client.insert_rows_json(table_id, rows_to_insert)
     if errors:
         print("BigQueryへのインサート中にエラーが発生しました:", errors)
     else:
@@ -473,91 +765,124 @@ def insert_results_to_bigquery(results, table_id):
 
 
 
+def main():
+    # ここにプログラムの主要な処理を記述します
+    print("プログラムが開始されました。")
 
-
-
-import uuid
-
-def main(request):
-    """
-    メインの処理:
-      1) トークン取得
-      2) 当日の清掃データを取得 (特定 photoTourId に該当)
-      3) commonAreaId を追加
-      4) 画像URLリストを追加
-      5) 判定を行い、結果を表示・保存
-    """
-    # 1) トークン取得
+    # 例: トークンの取得
     token = get_api_token()
     if not token:
-        print("[ERROR] Could not retrieve token. Exiting.")
+        print("[ERROR] トークン取得失敗")
         return
 
-    # 2) 当日の清掃データを取得 (例: photoTourId = "0a8b54c9-1d99-460b-9085-4bdfe56af9ce")
+    # 例: 当日の清掃データの取得
     target_photo_tour_id = "0a8b54c9-1d99-460b-9085-4bdfe56af9ce"
     filtered_cleanings = get_today_cleanings(token, target_photo_tour_id)
 
+    # 例: filtered_cleanings の数をログで表示
+    print(f"[INFO] 本日のゴミ状況チェックツアーの数: {len(filtered_cleanings)}")
+
+    # 例: filtered_cleanings の内容をログで表示
+    if filtered_cleanings:
+        print("[INFO] 本日のゴミ状況チェックツアーの詳細:")
+        for cleaning in filtered_cleanings:
+            print(cleaning)
+
     if not filtered_cleanings:
-        print("[ERROR] No cleanings found for the given photoTourId.")
+        print("[ERROR] 本日のゴミ状況チェックツアーが見つかりませんでした")
         return
 
-    # 3) 各清掃データに対して commonAreaId を追加
-    print("[INFO] Enriching cleaning data with commonAreaId...")
-    enriched_cleanings = enrich_multiple_cleanings_with_common_area_id(token, filtered_cleanings)
+    # 例: placement_recordsの取得
+    placement_data = get_collecting_and_commonarea_id()
 
-    # デバッグログ：commonAreaIdを追加した後のデータ
-    print("[INFO] Final enriched cleanings with commonAreaId added:")
-    print(json.dumps(enriched_cleanings, ensure_ascii=False, indent=2))
+    # 例: 各清掃データにplacement情報を追加
+    enriched_cleanings = add_collecting_and_commonarea_id(filtered_cleanings, placement_data)
 
-    # 4) 複数の清掃に対して画像URLを追加
-    ai_data = enrich_multiple_cleanings_with_images(token, enriched_cleanings)
+    # 例: 明日の日付に基づいてtomorrow_column_valueがNoneでないデータを除外
+    classificated_cleanings = filter_cleanings_by_tomorrow_column_value(enriched_cleanings)
+
+    filtered_cleanings = classificated_cleanings[0]
+    excluded_cleanings = classificated_cleanings[1]
+
+    print(f"[INFO] 明日回収作業が行われないゴミチェックツアーの数: {len(filtered_cleanings)}")
+    print(filtered_cleanings)
+
+    # 例: 複数の清掃に対して画像URLを追加
+    ai_data = enrich_multiple_cleanings_with_images(token, filtered_cleanings)
 
     if not ai_data:
         print("[ERROR] No AI data available after enrichment.")
         return
 
-    # 5) AI判定を行う
-    result = []  # 結果を格納するリスト
-    for cleaning in ai_data:
-        image_urls = cleaning["urls"]
-        placement_id = cleaning["placementId"]
-        commonarea_name = cleaning["commonAreaName"]
-        cleaning_id = cleaning["id"]
-        common_area_id = cleaning["commonAreaId"]  # commonAreaIdを取得
-        print(f"[INFO] Processing cleaning_id: {cleaning_id} with commonAreaId: {common_area_id}")
+    # 例: 画像URLのカウント
+    total_images = sum(len(cleaning.get("urls", [])) for cleaning in ai_data)
+    print(f"[INFO] 取得した画像は {total_images}枚です")
 
-        # 6) 各画像に対して判定を行い、結果を格納
+    # 結果を表示
+    print("[INFO] === ai_data の詳細 ===")
+    for index, item in enumerate(ai_data):
+        print(f"[INFO] --- Item {index + 1} ---")
+        print(json.dumps(item, ensure_ascii=False, indent=4))
+        print("[INFO] -------------------------")
+
+    # 例: AI判定を行う処理
+    result = []  # 結果を格納するリスト
+
+    for cleaning in ai_data:
+        image_urls = cleaning.get("urls", [])
+        commonarea_name = cleaning.get("commonAreaName", "不明")
+        type = cleaning.get("type", "不明")
+
+        if not image_urls:
+            print(f"[INFO] {commonarea_name}の画像がありませんでした。")
+            # 判定結果がない場合でも、ai_dataに情報を追加
+            cleaning["judgments"] = []  # 空のjudgmentsリストを追加
+            result.append(cleaning)  # シートに出力するために追加
+            continue  # 次のcleaningデータに進む
+
+        print(f"[INFO] {commonarea_name}の画像を判定中 ")
+
+        judgments = []
         for url in image_urls:
             # AI結果を取得
-            judge_result = judge_trash([url], placement_id, commonarea_name, cleaning_id, common_area_id)
+            judge_result = judge_trash([url])
             if judge_result:
-                result.extend(judge_result)  # 画像ごとに判定結果を追加
+                judgments.extend(judge_result)  # 画像ごとに判定結果を追加
 
-    # 7) 結果を最終的に表示または保存する
-    print("[INFO] Final judgment result:")
+        # 判定結果をai_dataに追加
+        cleaning["judgments"] = judgments if judgments else []  # 判定結果を追加
+
+        result.append(cleaning)  # シートに出力するために追加
+
+
+    # 例: 結果を最終的に表示または保存する
+    print("[INFO] result:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
-    # 8) 「〇」のみをフィルタリング
-    success_results = filter_success_results(result)
-    print("\n[INFO] Success results (〇 only):")
-    print(json.dumps(success_results, ensure_ascii=False, indent=2))
 
-    # 9) unique_idを生成して結果に追加
-    for item in result:
-        item["unique_id"] = str(uuid.uuid4())  # unique_idを生成し、各エントリーに追加
+    write_to_sheet(result)
+    insert_results_to_bigquery(result)
 
-    # 10) 最終的に1つの辞書として返す
-    final_result = {
-        "result": result,
-        "success_results": success_results
-    }
+    print("[INFO]すべての処理が完了しました")
 
-    # `final_result["result"]` をGoogle Sheetsの「判定一覧」シートに書き込む
-    write_to_sheet(final_result["result"], sheet_name="判定一覧")
 
-    # BigQueryにインサート
-    table_id = "m2m-core.su_wo.trash_ai_results"
-    insert_results_to_bigquery(final_result["result"], table_id)
+from flask import Flask, request, jsonify
+import os
 
-    return final_result
+app = Flask(__name__)
 
+@app.route('/', methods=['POST'])
+def index():
+    # GASからのリクエストボディ(JSON)を取得（必要に応じて利用）
+    payload = request.get_json(silent=True) or {}
+    print("[INFO] Received payload:", payload)
+    
+    # メイン処理を実行
+    main()
+    
+    # JSON形式でレスポンスを返す
+    return jsonify({'message': '処理が完了しました。'})
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
